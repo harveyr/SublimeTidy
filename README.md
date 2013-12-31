@@ -18,3 +18,8 @@ This is my latest attempt at a linting tool. For some reason I like spending tim
 1. Because.
 
 **Epic screenshot.**
+
+Each line with an issue gets a little dot. If you committed the line, it's a red dot. (Though the colors will vary depending on the color scheme.)
+![screenshot](https://raw.github.com/harveyr/SublimeTidy/master/screenshot.png)
+
+
