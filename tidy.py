@@ -14,6 +14,27 @@ JSHINT_REX = re.compile(r'\w+: line (\d+), col (\d+),\s(.+)$', re.MULTILINE)
 
 # TODO: Add blaming
 
+class Issue(object):
+    def __init__(self, line, column, code, message, reporter):
+        self.line = int(line)
+        if column:
+            self.column = int(column)
+        else:
+            self.column = column
+        self.code = code
+        self.message = message
+        self.reporter = reporter
+
+    def __str__(self):
+        reporter = '[{}]'.format(self.reporter)
+        return '{:<10} {}:{} {}'.format(
+            reporter,
+            self.line,
+            self.column,
+            self.message
+        )
+
+
 def run(cmd):
     proc = subprocess.Popen(
         cmd,
@@ -32,7 +53,14 @@ def pylint(path):
     hits = PYLINT_REX.findall(output)
     results = []
     for hit in hits:
-        results.append({
+        results.append(
+            Issue(
+                line=hit[1],
+                column=hit[2],
+                message=hit[3],
+                code=hit[0],
+                reporter='Pylint'
+            )
             'code': hit[0],
             'line': int(hit[1]),
             'column': int(hit[2]),
@@ -58,6 +86,21 @@ def pep8(path):
     return results
 
 
+def pyflakes(path):
+    output = run('/usr/local/bin/pyflakes {}'.format(path))
+    hits = PYFLAKES_REX.findall(output)
+    results = []
+    for hit in hits:
+        results.append({
+            'line': hit[0],
+            'column': '',
+            'code': '',
+            'message': hit[1],
+            'reporter': 'Pyflakes'
+        })
+    return results
+
+
 class Issues(object):
 
     def __init__(self):
@@ -76,7 +119,8 @@ class Issues(object):
         if self.path.endswith('.py'):
             self.issues = (
                 pylint(self.path) +
-                pep8(self.path)
+                pep8(self.path) +
+                pyflakes(self.path)
             )
 
     def get_issue(self, line):
@@ -110,7 +154,6 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
         line_no = len(
             self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
         )
-        str_ = lambda x: '[{}] {}'.format(x['reporter'], x['message'])
         issue_strs = [str_(i) for i in issues.issues if i['line'] == line_no]
         w = sublime.active_window()
         panel = w.create_output_panel('tidy_issues_panel')
@@ -133,7 +176,6 @@ class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
         if remainder_line_nos:
             target_line = remainder_line_nos[0]
         else:
-            print('issues_line_nos: {0}'.format(issues_line_nos))
             target_line = issues_line_nos[0]
 
         line_regions = self.view.lines(sublime.Region(0, self.view.size()))
