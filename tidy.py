@@ -6,6 +6,8 @@ from collections import defaultdict
 import os
 
 
+PACKAGE_SETTINGS = sublime.load_settings('tidy.sublime-settings')
+
 MY_BLAME_REGION_KEY = 'sublime_tidy_regions_mine'
 OTHERS_BLAME_REGION_KEY = 'sublime_tidy_regions_others'
 STATUS_KEY = 'sublime_tidy_status'
@@ -16,10 +18,11 @@ PYFLAKES_REX = re.compile(r'\w+:(\d+):\s(.+)$', re.MULTILINE)
 JSHINT_REX = re.compile(r'\w+: line (\d+), col (\d+),\s(.+)$', re.MULTILINE)
 BLAME_NAME_REX = re.compile(r'\(([\w\s]+)\d{4}')
 
-# TODO ...
-MY_NAME = 'Harvey Rogers'
+MY_NAME_REX = re.compile(PACKAGE_SETTINGS.get('my_name_rex'), re.I)
 
-# TODO: Add blaming
+
+# TODO: Move executable paths into settings
+# TODO: Use scope instead of extension to determine what to run?
 
 class Issue(object):
     def __init__(self, line, column, code, message, reporter):
@@ -54,7 +57,7 @@ def run(cmd):
 
 
 def pylint(path):
-    # TODO: Find pylint path properly
+    """Pylint issues."""
     cmd = "/usr/local/bin/pylint --output-format=text '{}'".format(path)
     output = run(cmd)
     hits = PYLINT_REX.findall(output)
@@ -73,7 +76,7 @@ def pylint(path):
 
 
 def pep8(path):
-    """Returns pep8 results."""
+    """PEP8 issues."""
     output = run("/usr/local/bin/pep8 '{}'".format(path))
     hits = PEP8_REX.findall(output)
     results = []
@@ -91,6 +94,7 @@ def pep8(path):
 
 
 def pyflakes(path):
+    """PyFlakes issues."""
     cmd = "/usr/local/bin/pyflakes '{}'".format(path)
     output = run(cmd)
     hits = PYFLAKES_REX.findall(output)
@@ -103,6 +107,25 @@ def pyflakes(path):
                 code='',
                 message=hit[1],
                 reporter='Pyflakes'
+            )
+        )
+    return results
+
+
+def jshint(path):
+    """JsHint issues."""
+    cmd = 'jshint {}'.format(path)
+    output = run(cmd)
+    hits = JSHINT_REX.findall(output)
+    results = []
+    for hit in hits:
+        results.append(
+            Issue(
+                line=hit[0],
+                column=hit[1],
+                code='',
+                message=hit[2],
+                reporter='JSHint'
             )
         )
     return results
@@ -148,14 +171,17 @@ class Issues(object):
             return
         self.issues = []
 
-        if self.path.endswith('.py'):
+        root, ext = os.path.splitext(self.path)
+        print('ext: {0}'.format(ext))
+        if ext == '.py':
             self.issues = (
                 pylint(self.path) +
                 pep8(self.path) +
                 pyflakes(self.path)
             )
+        elif ext in ['.js', '.json', '.sublime-settings']:
+            self.issues = jshint(self.path)
 
-    @property
     def issues_by_line(self):
         d = defaultdict(list)
         for issue in self.issues:
@@ -166,16 +192,6 @@ class Issues(object):
         return self.blame_by_line.get(issue.line, None)
 
 issues = Issues()
-
-
-class ShowTidyIssuesOLDCommand(sublime_plugin.TextCommand):
-    def run(self, edit):
-        line_no = len(
-            self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
-        )
-        str_ = lambda x: '[{}] {}'.format(x['reporter'], x['message'])
-        issue_strs = [str_(i) for i in issues.issues if i['line'] == line_no]
-        self.view.show_popup_menu(issue_strs, None)
 
 
 class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
@@ -199,13 +215,25 @@ class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
         current_line = len(
             self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
         )
-        issues_by_line = issues.issues_by_line
+        issues_by_line = issues.issues_by_line()
         issues_line_nos = sorted(issues_by_line.keys())
         remainder_line_nos = [l for l in issues_line_nos if l > current_line]
-        if remainder_line_nos:
-            target_line = remainder_line_nos[0]
-        else:
-            target_line = issues_line_nos[0]
+        try:
+            if remainder_line_nos:
+                target_line = remainder_line_nos[0]
+            else:
+                target_line = issues_line_nos[0]
+        except IndexError as e:
+            print(
+                'Failed to find target_line {} in:\n{}\n{}'.format(
+                    0,
+                    remainder_line_nos,
+                    issues_line_nos
+                )
+            )
+            raise e
+
+
 
         line_regions = self.view.lines(sublime.Region(0, self.view.size()))
         line_region = line_regions[target_line - 1]
@@ -217,9 +245,11 @@ class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
 
 
 class TidyListener(sublime_plugin.EventListener):
+    def on_post_save_async(self, view):
+        view.set_status(STATUS_KEY, 'Evaluating tidiness...')
 
-    def _apply(self, view):
-        view.erase_regions(REGION_KEY)
+        view.erase_regions(MY_BLAME_REGION_KEY)
+        view.erase_regions(OTHERS_BLAME_REGION_KEY)
         issues.set_path(view.file_name())
 
         lines = view.lines(sublime.Region(0, view.size()))
@@ -232,7 +262,7 @@ class TidyListener(sublime_plugin.EventListener):
                 line_region.begin(),
                 line_region.begin()
             )
-            if issues.blame(issue) == MY_NAME:
+            if MY_NAME_REX.search(issues.blame(issue)):
                 my_regions.append(issue_region)
             else:
                 others_regions.append(issue_region)
@@ -254,7 +284,4 @@ class TidyListener(sublime_plugin.EventListener):
         msg = '{} untidies'.format(count)
         if count > 0:
             msg = msg.upper()
-        view.set_status(STATUS_KEY, msg)
-        
-    def on_post_save_async(self, view):
-        self._apply(view)
+        view.set_status(STATUS_KEY, msg)    
