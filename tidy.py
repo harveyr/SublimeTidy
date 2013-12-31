@@ -2,14 +2,17 @@ import sublime
 import sublime_plugin
 import re
 import subprocess
+from collections import defaultdict
 
-REGION_KEY = 'sublime_tidy'
+REGION_KEY = 'sublime_tidy_regions'
+STATUS_KEY = 'sublime_tidy_status'
 
 PEP8_REX = re.compile(r'\w+:(\d+):(\d+):\s(\w+)\s(.+)$', re.MULTILINE)
 PYLINT_REX = re.compile(r'^(\w):\s+(\d+),\s*(\d+):\s(.+)$', re.MULTILINE)
 PYFLAKES_REX = re.compile(r'\w+:(\d+):\s(.+)$', re.MULTILINE)
 JSHINT_REX = re.compile(r'\w+: line (\d+), col (\d+),\s(.+)$', re.MULTILINE)
 
+# TODO: Add blaming
 
 def run(cmd):
     proc = subprocess.Popen(
@@ -81,8 +84,25 @@ class Issues(object):
             if issue['line'] == line:
                 return issue
 
+    @property
+    def issues_by_line(self):
+        d = defaultdict(list)
+        for issue in self.issues:
+            d[issue['line']].append(issue)
+        return d
+
 
 issues = Issues()
+
+
+class ShowTidyIssuesOLDCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        line_no = len(
+            self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
+        )
+        str_ = lambda x: '[{}] {}'.format(x['reporter'], x['message'])
+        issue_strs = [str_(i) for i in issues.issues if i['line'] == line_no]
+        self.view.show_popup_menu(issue_strs, None)
 
 
 class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
@@ -92,13 +112,43 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
         )
         str_ = lambda x: '[{}] {}'.format(x['reporter'], x['message'])
         issue_strs = [str_(i) for i in issues.issues if i['line'] == line_no]
-        print('issue_strs: {0}'.format(issue_strs))
+        w = sublime.active_window()
+        panel = w.create_output_panel('tidy_issues_panel')
+        panel.replace(
+            edit,
+            sublime.Region(0, panel.size()),
+            '\n'.join(issue_strs)
+        )
+        w.run_command('show_panel', {'panel': 'output.tidy_issues_panel'})
 
-        self.view.show_popup_menu(issue_strs, None)
+
+class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        current_line = len(
+            self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
+        )
+        issues_by_line = issues.issues_by_line
+        issues_line_nos = sorted(issues_by_line.keys())
+        remainder_line_nos = [l for l in issues_line_nos if l > current_line]
+        if remainder_line_nos:
+            target_line = remainder_line_nos[0]
+        else:
+            print('issues_line_nos: {0}'.format(issues_line_nos))
+            target_line = issues_line_nos[0]
+
+        line_regions = self.view.lines(sublime.Region(0, self.view.size()))
+        line_region = line_regions[target_line - 1]
+        self.view.show_at_center(line_region.begin())
+        sel = self.view.sel()
+        sel.clear()
+        sel.add(line_region)
+        self.view.run_command('show_tidy_issues')
 
 
 class TidyListener(sublime_plugin.EventListener):
-    def on_post_save_async(self, view):
+
+    def _apply(self, view):
+        view.erase_regions(REGION_KEY)
         issues.set_path(view.file_name())
 
         lines = view.lines(sublime.Region(0, view.size()))
@@ -116,3 +166,11 @@ class TidyListener(sublime_plugin.EventListener):
             'string',
             'dot'
         )
+
+        msg = '{} untidies'.format(len(regions))
+        if len(regions) > 0:
+            msg = msg.upper()
+        view.set_status(STATUS_KEY, msg)
+        
+    def on_post_save_async(self, view):
+        self._apply(view)
