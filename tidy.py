@@ -38,7 +38,7 @@ class Issue(object):
     def __str__(self):
         reporter = '[{}]'.format(self.reporter)
         location = '{}:{}'.format(self.line, self.column)
-        return '{:<9} {:<5} {}'.format(
+        return '{:<10} {:<5} {}'.format(
             reporter,
             location,
             self.message
