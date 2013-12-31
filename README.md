@@ -16,7 +16,7 @@ This is my latest attempt at a linting tool. For some reason I like spending tim
 **Why reinvent this wheel?**
 
 1. Other linters can clutter up your editor with feedback. Particularly, for example, if you're editing a file written by someone who isn't a huge PEP8 fan. I want to make the initial feedback as minimal as possible.
-1. I want to combine the results of several linters (PEP8, PyFlakes, and Pylint, etc.).
+1. I want to combine the results of several linters (PEP8, PyFlakes, and Pylint, etc.). As you can see in the screenshot, they each hit some different stuff.
 1. I want to cross-reference each issue with git/hg blaming in order to highlight which style uglies *you* have made. Policing others' coding style is not always appreciated.
 1. Because.
 
