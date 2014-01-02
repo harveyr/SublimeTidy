@@ -1,6 +1,10 @@
 [
     {
-        "caption": "SublimeTidy: Next",
+        "caption": "Tidy: Run",
+        "command": "run_tidy"
+    },
+    {
+        "caption": "Tidy: Next",
         "command": "jump_to_next_untidy"
     }
 ]

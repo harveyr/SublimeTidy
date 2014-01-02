@@ -4,6 +4,7 @@ import re
 import subprocess
 from collections import defaultdict
 import os
+import threading
 
 
 PACKAGE_SETTINGS = sublime.load_settings('tidy.sublime-settings')
@@ -23,6 +24,7 @@ MY_NAME_REX = re.compile(PACKAGE_SETTINGS.get('my_name_rex'), re.I)
 
 # TODO: Move executable paths into settings
 # TODO: Use scope instead of extension to determine what to run?
+
 
 class Issue(object):
     def __init__(self, line, column, code, message, reporter):
@@ -172,11 +174,10 @@ class Issues(object):
         self.issues = []
 
         root, ext = os.path.splitext(self.path)
-        print('ext: {0}'.format(ext))
         if ext == '.py':
             self.issues = (
-                pylint(self.path) +
                 pep8(self.path) +
+                pylint(self.path) +
                 pyflakes(self.path)
             )
         elif ext in ['.js', '.json', '.sublime-settings']:
@@ -196,9 +197,10 @@ issues = Issues()
 
 class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
     def run(self, edit):
-        line_no = len(
-            self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
+        line_regions = self.view.lines(
+            sublime.Region(0, self.view.sel()[0].begin() + 1)
         )
+        line_no = len(line_regions)
         issue_strs = [str(i) for i in issues.issues if i.line == line_no]
         w = sublime.active_window()
         panel = w.create_output_panel('tidy_issues_panel')
@@ -209,8 +211,14 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
         )
         w.run_command('show_panel', {'panel': 'output.tidy_issues_panel'})
 
+        sel = self.view.sel()
+        sel.clear()
+        sel.add(line_regions[-1])
+
 
 class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
+    # TODO: Index by region instead of line. This will break as soon as
+    # the user adds/removes a line.
     def run(self, edit):
         current_line = len(
             self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
@@ -233,8 +241,6 @@ class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
             )
             raise e
 
-
-
         line_regions = self.view.lines(sublime.Region(0, self.view.size()))
         line_region = line_regions[target_line - 1]
         self.view.show_at_center(line_region.begin())
@@ -244,12 +250,18 @@ class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
         self.view.run_command('show_tidy_issues')
 
 
-class TidyListener(sublime_plugin.EventListener):
-    def on_post_save_async(self, view):
+class RunTidyCommand(sublime_plugin.TextCommand):
+    def _erase_regions(self):
+        self.view.erase_regions(MY_BLAME_REGION_KEY)
+        self.view.erase_regions(OTHERS_BLAME_REGION_KEY)
+
+    def _run(self):
+        print('_run')
+        view = self.view
         view.set_status(STATUS_KEY, 'Evaluating tidiness...')
 
-        view.erase_regions(MY_BLAME_REGION_KEY)
-        view.erase_regions(OTHERS_BLAME_REGION_KEY)
+        self._erase_regions()
+
         issues.set_path(view.file_name())
 
         lines = view.lines(sublime.Region(0, view.size()))
@@ -285,3 +297,39 @@ class TidyListener(sublime_plugin.EventListener):
         if count > 0:
             msg = msg.upper()
         view.set_status(STATUS_KEY, msg)    
+
+    def run(self, edit):
+        try:
+            if self.run_thread.is_alive():
+                print('returning')
+                return
+        except AttributeError:
+            pass
+        print('here')
+        self.run_thread = threading.Thread(target=self._run)
+        self.run_thread.start()
+
+
+class TidyListener(sublime_plugin.EventListener):
+    def on_post_save_async(self, view):
+        view.run_command('run_tidy')
+
+    def on_load_async(self, view):
+        view.run_command('run_tidy')
+
+    # Enable this if we want to save the buffer into a temp file.
+    # Otherwise it's pointless.
+    def _on_modified_async(self, view):
+        # self._erase_regions(view)
+        try:
+            self.delayed_run.cancel()
+        except AttributeError:
+            pass
+        self.delayed_run = threading.Timer(
+            5,
+            self._run,
+            kwargs={'view': view}
+        )
+        self.delayed_run.start()
+        view.set_status(STATUS_KEY, 'Tidy: Waiting...')
+
