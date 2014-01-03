@@ -39,9 +39,21 @@ class Issue(object):
         reporter = '[{}]'.format(self.reporter)
         location = '{}:{}'.format(self.line, self.column)
 
-        return '{:<10} {:<5} {}'.format(
-            reporter,
+        return '{:<5} {:<10} {}'.format(
             location,
+            reporter,
+            self.message
+        )
+
+    def blamed_str(self, blame_name):
+        reporter = '[{}]'.format(self.reporter)
+        location = '{}:{}'.format(self.line, self.column)
+        blame = '[{}]'.format(blame_name)
+
+        return '{:<5} {:<10} {} {}'.format(
+            location,
+            reporter,
+            blame,
             self.message
         )
 
@@ -182,14 +194,8 @@ class Issues(object):
         root, ext = os.path.splitext(self.path)
         if ext == '.py':
             issue_funcs = [pep8, pylint, pyflakes]
-            # self.issues = (
-            #     pep8(self.path) +
-            #     pylint(self.path) +
-            #     pyflakes(self.path)
-            # )
         elif ext in ['.js', '.json', '.sublime-settings']:
             issue_funcs = [jshint]
-            # self.issues = jshint(self.path)
 
         threads = []
         for func in issue_funcs:
@@ -227,7 +233,10 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
             sublime.Region(0, self.view.sel()[0].begin() + 1)
         )
         line_no = len(line_regions)
-        issue_strs = [str(i) for i in issues.issues if i.line == line_no]
+        issue_strs = [
+            i.blamed_str(issues.blame(i)) for i in issues.issues
+            if i.line == line_no
+        ]
         w = sublime.active_window()
         panel = w.create_output_panel('tidy_issues_panel')
         panel.replace(
@@ -243,8 +252,6 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
 
 
 class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
-    # TODO: Index by region instead of line. This will break as soon as
-    # the user adds/removes a line.
     def run(self, edit):
         current_line = len(
             self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
@@ -348,9 +355,6 @@ class TidyListener(sublime_plugin.EventListener):
 
     def on_load_async(self, view):
         view.run_command('run_tidy')
-
-    # def on_modified_async(self, view):
-    #     view.run_command('clear_tidy')
 
     # Enable this if we want to save the buffer into a temp file.
     # Otherwise it's pointless.
