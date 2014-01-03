@@ -22,11 +22,8 @@ BLAME_NAME_REX = re.compile(r'\(([\w\s]+)\d{4}')
 MY_NAME_REX = re.compile(PACKAGE_SETTINGS.get('my_name_rex'), re.I)
 
 
-# TODO: Move executable paths into settings
-# TODO: Use scope instead of extension to determine what to run?
-
-
 class Issue(object):
+    """Represents a single linter issue."""
     def __init__(self, line, column, code, message, reporter):
         self.line = int(line)
         if column:
@@ -36,15 +33,20 @@ class Issue(object):
         self.code = code
         self.message = message
         self.reporter = reporter
+        self.region = None
 
     def __str__(self):
         reporter = '[{}]'.format(self.reporter)
         location = '{}:{}'.format(self.line, self.column)
+
         return '{:<10} {:<5} {}'.format(
             reporter,
             location,
             self.message
         )
+
+    def set_region(self, region):
+        self.region = region
 
 
 def run(cmd):
@@ -134,7 +136,7 @@ def jshint(path):
 
 
 def git_name():
-    return subprocess.check_output(["git", "config", "user.name"]).strip()
+    return subprocess.check_output(['git', 'config', 'user.name']).strip()
 
 
 def blame(path):
@@ -158,7 +160,7 @@ def blame(path):
 
 
 class Issues(object):
-
+    """Collection that holds all lint issues."""
     def __init__(self):
         self.path = None
         self.issues = []
@@ -168,25 +170,49 @@ class Issues(object):
         self.update_issues()
         self.blame_by_line = blame(path)
 
+    def _append_issues(self, issues_func):
+        self.issues += issues_func(self.path)
+
     def update_issues(self):
+        """Run linters and save results."""
         if not self.path:
             return
         self.issues = []
 
         root, ext = os.path.splitext(self.path)
         if ext == '.py':
-            self.issues = (
-                pep8(self.path) +
-                pylint(self.path) +
-                pyflakes(self.path)
-            )
+            issue_funcs = [pep8, pylint, pyflakes]
+            # self.issues = (
+            #     pep8(self.path) +
+            #     pylint(self.path) +
+            #     pyflakes(self.path)
+            # )
         elif ext in ['.js', '.json', '.sublime-settings']:
-            self.issues = jshint(self.path)
+            issue_funcs = [jshint]
+            # self.issues = jshint(self.path)
+
+        threads = []
+        for func in issue_funcs:
+            t = threading.Thread(
+                target=self._append_issues,
+                args=[func]
+            )
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join(10)
 
     def issues_by_line(self):
         d = defaultdict(list)
         for issue in self.issues:
             d[issue.line].append(issue)
+        return d
+
+    def issues_by_region(self):
+        d = defaultdict(list)
+        for issue in self.issues:
+            d[issue.region].append(issue)
         return d
 
     def blame(self, issue):
@@ -250,18 +276,23 @@ class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
         self.view.run_command('show_tidy_issues')
 
 
-class RunTidyCommand(sublime_plugin.TextCommand):
-    def _erase_regions(self):
+class ClearTidyCommand(sublime_plugin.TextCommand):
+    """Clear all regions and status."""
+    def run(self, edit):
         self.view.erase_regions(MY_BLAME_REGION_KEY)
         self.view.erase_regions(OTHERS_BLAME_REGION_KEY)
+        self.view.erase_status(STATUS_KEY)
 
+
+class RunTidyCommand(sublime_plugin.TextCommand):
+    """Run all linters and apply results."""
     def _run(self):
-        print('_run')
         view = self.view
         view.set_status(STATUS_KEY, 'Evaluating tidiness...')
 
-        self._erase_regions()
+        self.view.run_command('clear_tidy')
 
+        # Updates the stuffs
         issues.set_path(view.file_name())
 
         lines = view.lines(sublime.Region(0, view.size()))
@@ -274,6 +305,7 @@ class RunTidyCommand(sublime_plugin.TextCommand):
                 line_region.begin(),
                 line_region.begin()
             )
+            issue.set_region(issue_region)
             if MY_NAME_REX.search(issues.blame(issue)):
                 my_regions.append(issue_region)
             else:
@@ -293,29 +325,32 @@ class RunTidyCommand(sublime_plugin.TextCommand):
         )
 
         count = len(issues.issues)
-        msg = '{} untidies'.format(count)
-        if count > 0:
-            msg = msg.upper()
-        view.set_status(STATUS_KEY, msg)    
+        if count:
+            msg = 'Untidy ({})'.format(count)
+        else:
+            msg = 'Tidy!'
+        view.set_status(STATUS_KEY, msg)
 
     def run(self, edit):
         try:
             if self.run_thread.is_alive():
-                print('returning')
                 return
         except AttributeError:
             pass
-        print('here')
         self.run_thread = threading.Thread(target=self._run)
         self.run_thread.start()
 
 
 class TidyListener(sublime_plugin.EventListener):
+    """Determines when to update/clear results."""
     def on_post_save_async(self, view):
         view.run_command('run_tidy')
 
     def on_load_async(self, view):
         view.run_command('run_tidy')
+
+    # def on_modified_async(self, view):
+    #     view.run_command('clear_tidy')
 
     # Enable this if we want to save the buffer into a temp file.
     # Otherwise it's pointless.
@@ -332,4 +367,3 @@ class TidyListener(sublime_plugin.EventListener):
         )
         self.delayed_run.start()
         view.set_status(STATUS_KEY, 'Tidy: Waiting...')
-
