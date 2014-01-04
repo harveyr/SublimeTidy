@@ -31,6 +31,7 @@ MY_NAME_REX = re.compile(
 # TODO: Deal with changing views: only one view's data can be stored at a time
 # TODO: If panel is up during update, update panel contents
 
+
 class Issue(object):
     """Represents a single linter issue."""
     def __init__(self, line, column, code, message, reporter):
@@ -252,63 +253,118 @@ class Issues(object):
 issues = Issues()
 
 
-def run_and_apply_tidy(view, use_buffer=False, force=False):
-    if not view.is_dirty() and not force:
-        print('Tidy: Clean and unforced. Aborting.')
-        return
+class ViewUpdateManager(object):
 
-    view.run_command('clear_tidy')
-    view.set_status(STATUS_KEY, 'Tidy: Evaluating...')
+    def __init__(self):
+        self.run_thread = None
+        self.delayed_run_thread = None
 
-    current_file = view.file_name()
-    if not current_file:
-        return
+    @property
+    def is_running(self):
+        try:
+            return self.run_thread.is_alive()
+        except AttributeError:
+            return False
 
-    if use_buffer:
-        root, ext = os.path.splitext(current_file)
-        tf = tempfile.NamedTemporaryFile(mode='w', suffix=ext)
-        text = view.substr(sublime.Region(0, view.size()))
-        tf.write(text)
-        issues.set_path(current_file, lint_override_target=tf.name)
-        tf.close()
-    else:
-        issues.set_path(current_file)
+    def cancel_delayed_run_thread(self):
+        """Returns True if successful cancellation before thread is alive."""
+        if self.delayed_run_thread:
+            self.delayed_run_thread.cancel()
 
-    lines = view.lines(sublime.Region(0, view.size()))
-
-    my_regions = []
-    others_regions = []
-    for issue in issues.issues:
-        line_region = lines[issue.line - 1]
-        issue_region = sublime.Region(
-            line_region.begin(),
-            line_region.begin()
+    def run_delayed(self, view, use_buffer=False, force=False):
+        self.cancel_delayed_run_thread()
+        self.delayed_run_thread = threading.Timer(
+            5,
+            self._run_and_apply_tidy,
+            kwargs={
+                'view': view,
+                'use_buffer': use_buffer,
+                'force': force,
+            }
         )
-        issue.set_region(issue_region)
-        if MY_NAME_REX.search(issues.blame(issue)):
-            my_regions.append(issue_region)
+        self.delayed_run_thread.start()
+        view.set_status(STATUS_KEY, 'Tidy: Updating shortly...')
+
+    def run_now(self, view):
+        if self.is_running:
+            print('Tidy already running.')
+            return
+
+        self.cancel_delayed_run_thread()
+
+        self.run_thread = threading.Thread(
+            target=self._run_and_apply_tidy,
+            kwargs={
+                'view': view,
+                'force': True,
+            }
+        )
+        self.run_thread.start()
+
+    def _run_and_apply_tidy(self, view, use_buffer=False, force=False):
+        print('Tidy: Attempting update...')
+        if not view.is_dirty() and not force:
+            print('Tidy: Clean and unforced. Aborting.')
+            return
+
+        view.run_command('clear_tidy')
+        view.set_status(STATUS_KEY, 'Tidy: Evaluating...')
+
+        current_file = view.file_name()
+        if not current_file:
+            return
+
+        if use_buffer:
+            root, ext = os.path.splitext(current_file)
+            tf = tempfile.NamedTemporaryFile(mode='w', suffix=ext)
+            text = view.substr(sublime.Region(0, view.size()))
+            tf.write(text)
+            issues.set_path(current_file, lint_override_target=tf.name)
+            tf.close()
         else:
-            others_regions.append(issue_region)
+            issues.set_path(current_file)
 
-    view.add_regions(
-        MY_BLAME_REGION_KEY,
-        my_regions,
-        'keyword',
-        'dot'
-    )
-    view.add_regions(
-        OTHERS_BLAME_REGION_KEY,
-        others_regions,
-        'string',
-        'dot'
-    )
+        self._update_view(view)
 
-    count = len(issues.issues)
-    if count:
-        msg = 'Untidy ({})'.format(count)
-    else:
-        msg = 'Tidy!'
-    view.set_status(STATUS_KEY, msg)
+    def _update_view(self, view):
+        lines = view.lines(sublime.Region(0, view.size()))
+
+        my_regions = []
+        others_regions = []
+        for issue in issues.issues:
+            line_region = lines[issue.line - 1]
+            issue_region = sublime.Region(
+                line_region.begin(),
+                line_region.begin()
+            )
+            issue.set_region(issue_region)
+            if MY_NAME_REX.search(issues.blame(issue)):
+                my_regions.append(issue_region)
+            else:
+                others_regions.append(issue_region)
+
+        view.add_regions(
+            MY_BLAME_REGION_KEY,
+            my_regions,
+            'keyword',
+            'dot'
+        )
+        view.add_regions(
+            OTHERS_BLAME_REGION_KEY,
+            others_regions,
+            'string',
+            'dot'
+        )
+
+        count = len(issues.issues)
+        if count:
+            msg = 'Untidy ({})'.format(count)
+        else:
+            msg = 'Tidy!'
+        view.set_status(STATUS_KEY, msg)
+        print('Tidy: Finished update.')
+
+update_manager = ViewUpdateManager()
 
 
 class TidyBaseTextCommand(sublime_plugin.TextCommand):
@@ -405,73 +461,19 @@ class RunTidyDiffCommand(sublime_plugin.TextCommand):
 class RunTidyCommand(sublime_plugin.TextCommand):
     """Run all linters and apply results."""
     def run(self, edit):
-        try:
-            if self.run_thread.is_alive():
-                return
-        except AttributeError:
-            pass
-        self.run_thread = threading.Thread(
-            target=run_and_apply_tidy,
-            kwargs=dict(
-                view=self.view,
-                force=True,
-            )
-        )
-        self.run_thread.start()
+        update_manager.run_now(self.view)
 
 
 class TidyListener(sublime_plugin.EventListener):
     """Determines when to update/clear results."""
-
-    @property
-    def active_file(self):
-        return sublime.active_window().active_view().file_name()
-
-    def clear(self, view):
-        view.run_command('clear_tidy')
-
-    @property
-    def is_running(self):
-        try:
-            return self.run_thread.is_alive()
-        except AttributeError:
-            return False
-
-    def cancel_delayed_run_thread(self):
-        try:
-            self.delayed_run_thread.cancel()
-        except AttributeError:
-            pass
-
     def on_post_save_async(self, view):
-        if self.is_running:
-            return
-
-        self.cancel_delayed_run_thread()
-        self.run_thread = threading.Thread(
-            target=run_and_apply_tidy,
-            kwargs={
-                'view': view,
-                'force': True,
-            }
-        )
-        self.run_thread.start()
+        update_manager.run_now(view)
 
     def on_load_async(self, view):
-        run_and_apply_tidy(view, force=True)
+        update_manager.run_now(view)
 
     def on_modified_async(self, view):
-        self.cancel_delayed_run_thread()
-        self.delayed_run_thread = threading.Timer(
-            5,
-            run_and_apply_tidy,
-            kwargs={
-                'view': view,
-                'use_buffer': True,
-            }
-        )
-        self.delayed_run_thread.start()
-        view.set_status(STATUS_KEY, 'Tidy: Waiting...')
+        update_manager.run_delayed(view)
 
-    def on_deactivated_async(self, view):
-        issues.set_out_of_date(True)
+    # def on_deactivated_async(self, view):
+    #     issues.set_out_of_date(True)
