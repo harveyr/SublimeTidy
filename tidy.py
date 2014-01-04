@@ -27,8 +27,8 @@ MY_NAME_REX = re.compile(
 )
 
 # TODO: Provide report of all modified files
-# TODO: Make executable paths configurable
-# TODO: Deal with changing views: only one view's data can be stored at a time
+# TODO: Intelligently handle executable paths
+# TODO: Decide what to do about changing views
 # TODO: If panel is up during update, update panel contents
 
 
