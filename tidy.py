@@ -5,6 +5,7 @@ import subprocess
 from collections import defaultdict
 import os
 import threading
+import tempfile
 
 
 PACKAGE_SETTINGS = sublime.load_settings('tidy.sublime-settings')
@@ -19,7 +20,14 @@ PYFLAKES_REX = re.compile(r'\w+:(\d+):\s(.+)$', re.MULTILINE)
 JSHINT_REX = re.compile(r'\w+: line (\d+), col (\d+),\s(.+)$', re.MULTILINE)
 BLAME_NAME_REX = re.compile(r'\(([\w\s]+)\d{4}')
 
-MY_NAME_REX = re.compile(PACKAGE_SETTINGS.get('my_name_rex'), re.I)
+MY_NAME_REX = re.compile(
+    r'{}|Not Committed Yet'.format(PACKAGE_SETTINGS.get('my_name_rex')),
+    re.I
+)
+
+# TODO: Provide report of all modified files
+# TODO: Make executable paths configurable
+# TODO: Deal with changing views: only one view's data can be stored at a time
 
 
 class Issue(object):
@@ -48,12 +56,12 @@ class Issue(object):
     def blamed_str(self, blame_name):
         reporter = '[{}]'.format(self.reporter)
         location = '{}:{}'.format(self.line, self.column)
-        blame = '[{}]'.format(blame_name)
+        blame_str = '[{}]'.format(blame_name)
 
         return '{:<5} {:<10} {} {}'.format(
             location,
             reporter,
-            blame,
+            blame_str,
             self.message
         )
 
@@ -147,6 +155,14 @@ def jshint(path):
     return results
 
 
+def diff_files():
+    output = (
+        subprocess.check_output(['git', 'diff', '--name-only', 'master..']) +
+        subprocess.check_output(['git', 'diff', '--name-only'])
+    )
+    return [i.decode('utf-8') for i in output.splitlines() if i]
+
+
 def git_name():
     return subprocess.check_output(['git', 'config', 'user.name']).strip()
 
@@ -171,27 +187,84 @@ def blame(path):
     return result
 
 
+def run_and_apply_tidy(view, use_buffer=False, force=False):
+    if not view.is_dirty() and not force:
+        return
+
+    view.run_command('clear_tidy')
+    view.set_status(STATUS_KEY, 'Tidy: Evaluating...')
+
+    current_file = view.file_name()
+    if not current_file:
+        return
+
+    print('current_file: {0}'.format(current_file))
+    if use_buffer:
+        root, ext = os.path.splitext(current_file)
+        tf = tempfile.NamedTemporaryFile(mode='w', suffix=ext)
+        text = view.substr(sublime.Region(0, view.size()))
+        tf.write(text)
+        issues.set_path(current_file, lint_override_target=tf.name)
+        tf.close()
+    else:
+        issues.set_path(current_file)
+
+    lines = view.lines(sublime.Region(0, view.size()))
+
+    my_regions = []
+    others_regions = []
+    for issue in issues.issues:
+        line_region = lines[issue.line - 1]
+        issue_region = sublime.Region(
+            line_region.begin(),
+            line_region.begin()
+        )
+        issue.set_region(issue_region)
+        if MY_NAME_REX.search(issues.blame(issue)):
+            my_regions.append(issue_region)
+        else:
+            others_regions.append(issue_region)
+
+    view.add_regions(
+        MY_BLAME_REGION_KEY,
+        my_regions,
+        'keyword',
+        'dot'
+    )
+    view.add_regions(
+        OTHERS_BLAME_REGION_KEY,
+        others_regions,
+        'string',
+        'dot'
+    )
+
+    count = len(issues.issues)
+    if count:
+        msg = 'Untidy ({})'.format(count)
+    else:
+        msg = 'Tidy!'
+    view.set_status(STATUS_KEY, msg)
+
+
 class Issues(object):
     """Collection that holds all lint issues."""
     def __init__(self):
         self.path = None
         self.issues = []
+        self.set_out_of_date(True)
 
-    def set_path(self, path):
-        self.path = path
-        self.update_issues()
+    def set_path(self, path, lint_override_target=None):
+        self.update_issues(lint_override_target or path)
         self.blame_by_line = blame(path)
 
-    def _append_issues(self, issues_func):
-        self.issues += issues_func(self.path)
+    def _append_issues(self, issues_func, path):
+        self.issues += issues_func(path)
 
-    def update_issues(self):
+    def update_issues(self, path):
         """Run linters and save results."""
-        if not self.path:
-            return
         self.issues = []
 
-        root, ext = os.path.splitext(self.path)
+        root, ext = os.path.splitext(path)
         if ext == '.py':
             issue_funcs = [pep8, pylint, pyflakes]
         elif ext in ['.js', '.json', '.sublime-settings']:
@@ -201,13 +274,15 @@ class Issues(object):
         for func in issue_funcs:
             t = threading.Thread(
                 target=self._append_issues,
-                args=[func]
+                args=[func, path]
             )
             threads.append(t)
             t.start()
 
         for t in threads:
             t.join(10)
+
+        self.set_out_of_date(False)
 
     def issues_by_line(self):
         d = defaultdict(list)
@@ -224,11 +299,36 @@ class Issues(object):
     def blame(self, issue):
         return self.blame_by_line.get(issue.line, None)
 
+    @property
+    def out_of_date(self):
+        return self._out_of_date
+
+    def set_out_of_date(self, out_of_date=True):
+        self._out_of_date = out_of_date
+
 issues = Issues()
 
 
-class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
+class TidyBaseTextCommand(sublime_plugin.TextCommand):
+    def _prompt_refresh(self):
+        if sublime.ok_cancel_dialog('Tidy needs to refresh itself.'):
+            # TODO: This doesn't work right because threads.
+            self.view.run_command('run_tidy')
+            return True
+        return False
+
+    def _confirm_up_to_date(self):
+        if issues.out_of_date:
+            return self._prompt_refresh()
+        else:
+            return True
+
+
+class ShowTidyIssuesCommand(TidyBaseTextCommand):
     def run(self, edit):
+        if not self._confirm_up_to_date():
+            return
+
         line_regions = self.view.lines(
             sublime.Region(0, self.view.sel()[0].begin() + 1)
         )
@@ -251,8 +351,14 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
         sel.add(line_regions[-1])
 
 
-class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
+class JumpToNextUntidyCommand(TidyBaseTextCommand):
     def run(self, edit):
+        if not self._confirm_up_to_date():
+            return
+
+        if not issues.issues:
+            return
+
         current_line = len(
             self.view.lines(sublime.Region(0, self.view.sel()[0].begin() + 1))
         )
@@ -291,83 +397,63 @@ class ClearTidyCommand(sublime_plugin.TextCommand):
         self.view.erase_status(STATUS_KEY)
 
 
+class RunTidyDiffCommand(sublime_plugin.TextCommand):
+    def run(self, edit):
+        print('diff_files(): {0}'.format(diff_files()))
+
+
 class RunTidyCommand(sublime_plugin.TextCommand):
     """Run all linters and apply results."""
-    def _run(self):
-        view = self.view
-        view.set_status(STATUS_KEY, 'Evaluating tidiness...')
-
-        self.view.run_command('clear_tidy')
-
-        # Updates the stuffs
-        issues.set_path(view.file_name())
-
-        lines = view.lines(sublime.Region(0, view.size()))
-
-        my_regions = []
-        others_regions = []
-        for issue in issues.issues:
-            line_region = lines[issue.line - 1]
-            issue_region = sublime.Region(
-                line_region.begin(),
-                line_region.begin()
-            )
-            issue.set_region(issue_region)
-            if MY_NAME_REX.search(issues.blame(issue)):
-                my_regions.append(issue_region)
-            else:
-                others_regions.append(issue_region)
-
-        view.add_regions(
-            MY_BLAME_REGION_KEY,
-            my_regions,
-            'keyword',
-            'dot'
-        )
-        view.add_regions(
-            OTHERS_BLAME_REGION_KEY,
-            others_regions,
-            'string',
-            'dot'
-        )
-
-        count = len(issues.issues)
-        if count:
-            msg = 'Untidy ({})'.format(count)
-        else:
-            msg = 'Tidy!'
-        view.set_status(STATUS_KEY, msg)
-
     def run(self, edit):
         try:
             if self.run_thread.is_alive():
                 return
         except AttributeError:
             pass
-        self.run_thread = threading.Thread(target=self._run)
+        self.run_thread = threading.Thread(
+            target=run_and_apply_tidy,
+            kwargs=dict(
+                view=self.view,
+                force=True,
+            )
+        )
         self.run_thread.start()
 
 
 class TidyListener(sublime_plugin.EventListener):
     """Determines when to update/clear results."""
-    def on_post_save_async(self, view):
-        view.run_command('run_tidy')
 
-    def on_load_async(self, view):
-        view.run_command('run_tidy')
+    @property
+    def active_file(self):
+        return sublime.active_window().active_view().file_name()
 
-    # Enable this if we want to save the buffer into a temp file.
-    # Otherwise it's pointless.
-    def _on_modified_async(self, view):
-        # self._erase_regions(view)
+    def clear(self, view):
+        view.run_command('clear_tidy')
+
+    def cancel_run_thread(self):
         try:
             self.delayed_run.cancel()
         except AttributeError:
             pass
+
+    def on_post_save_async(self, view):
+        self.cancel_run_thread()
+        run_and_apply_tidy(view)
+
+    def on_load_async(self, view):
+        run_and_apply_tidy(view, force=True)
+
+    # Enable this if we want to save the buffer into a temp file.
+    # Otherwise it's pointless.
+    def on_modified_async(self, view):
+        self.cancel_run_thread()
         self.delayed_run = threading.Timer(
             5,
-            self._run,
-            kwargs={'view': view}
+            run_and_apply_tidy,
+            kwargs={
+                'view': view,
+                'use_buffer': True,
+            }
         )
         self.delayed_run.start()
         view.set_status(STATUS_KEY, 'Tidy: Waiting...')

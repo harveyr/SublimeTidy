@@ -6,5 +6,9 @@
     {
         "caption": "Tidy: Next",
         "command": "jump_to_next_untidy"
+    },
+    {
+        "caption": "Tidy: Diff",
+        "command": "run_tidy_diff"
     }
 ]
