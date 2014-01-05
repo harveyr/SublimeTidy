@@ -49,7 +49,7 @@ class Issue(object):
         reporter = '[{}]'.format(self.reporter)
         location = '{}:{}'.format(self.line, self.column)
 
-        return '{:<5} {:<10} {}'.format(
+        return '{:<5} {} {}'.format(
             location,
             reporter,
             self.message
@@ -258,6 +258,7 @@ class ViewUpdateManager(object):
     def __init__(self):
         self.run_thread = None
         self.delayed_run_thread = None
+        self.delayed_run_file = None
 
     @property
     def is_running(self):
@@ -271,7 +272,12 @@ class ViewUpdateManager(object):
         if self.delayed_run_thread:
             self.delayed_run_thread.cancel()
 
-    def run_delayed(self, view, use_buffer=False, force=False):
+    def run_delayed(
+        self,
+        view,
+        use_buffer=False,
+        force=False
+    ):
         self.cancel_delayed_run_thread()
         self.delayed_run_thread = threading.Timer(
             5,
@@ -283,7 +289,22 @@ class ViewUpdateManager(object):
             }
         )
         self.delayed_run_thread.start()
+        self.delayed_run_file = view.file_name()
         view.set_status(STATUS_KEY, 'Tidy: Updating shortly...')
+
+    def join(self):
+        try:
+            if self.delayed_run_thread.is_alive():
+                self.delayed_run_thread.cancel()
+
+            self.run_thread.join(3.0)
+            if self.run_thread.is_alive():
+                print('join timeout')
+                return False
+        except AttributeError:
+            pass
+
+        return True
 
     def run_now(self, view):
         if self.is_running:
@@ -303,14 +324,21 @@ class ViewUpdateManager(object):
 
     def _run_and_apply_tidy(self, view, use_buffer=False, force=False):
         print('Tidy: Attempting update...')
+
         if not view.is_dirty() and not force:
             print('Tidy: Clean and unforced. Aborting.')
+            self.clear_view(view)
             return
 
-        view.run_command('clear_tidy')
+        current_file = view.file_name()
+        if current_file != self.delayed_run_file:
+            print('Tidy: View file does not match current delayed_run_file')
+            self.clear_view(view)
+            return
+
+        self.clear_view(view)
         view.set_status(STATUS_KEY, 'Tidy: Evaluating...')
 
-        current_file = view.file_name()
         if not current_file:
             return
 
@@ -364,6 +392,11 @@ class ViewUpdateManager(object):
         view.set_status(STATUS_KEY, msg)
         print('Tidy: Finished update.')
 
+    def clear_view(self, view):
+        view.erase_regions(MY_BLAME_REGION_KEY)
+        view.erase_regions(OTHERS_BLAME_REGION_KEY)
+        view.erase_status(STATUS_KEY)
+
 update_manager = ViewUpdateManager()
 
 
@@ -410,9 +443,17 @@ class ShowTidyIssuesCommand(TidyBaseTextCommand):
 
 
 class JumpToNextUntidyCommand(TidyBaseTextCommand):
+    # TODO: Continue to figure out when we need to force an update here
     def run(self, edit):
-        # TODO: Run tidy if necessary
+        if not update_manager.join():
+            return
+
         if not issues.issues:
+            return
+        
+        line_regions = self.view.lines(sublime.Region(0, self.view.size()))
+        if not line_regions:
+            # This seems to happen when we're in the quick panel
             return
 
         current_line = len(
@@ -421,36 +462,18 @@ class JumpToNextUntidyCommand(TidyBaseTextCommand):
         issues_by_line = issues.issues_by_line()
         issues_line_nos = sorted(issues_by_line.keys())
         remainder_line_nos = [l for l in issues_line_nos if l > current_line]
-        try:
-            if remainder_line_nos:
-                target_line = remainder_line_nos[0]
-            else:
-                target_line = issues_line_nos[0]
-        except IndexError as e:
-            print(
-                'Failed to find target_line {} in:\n{}\n{}'.format(
-                    0,
-                    remainder_line_nos,
-                    issues_line_nos
-                )
-            )
-            raise e
 
-        line_regions = self.view.lines(sublime.Region(0, self.view.size()))
+        if remainder_line_nos:
+            target_line = remainder_line_nos[0]
+        else:
+            target_line = issues_line_nos[0]
+
         line_region = line_regions[target_line - 1]
         self.view.show_at_center(line_region.begin())
         sel = self.view.sel()
         sel.clear()
         sel.add(line_region)
         self.view.run_command('show_tidy_issues')
-
-
-class ClearTidyCommand(sublime_plugin.TextCommand):
-    """Clear all regions and status."""
-    def run(self, edit):
-        self.view.erase_regions(MY_BLAME_REGION_KEY)
-        self.view.erase_regions(OTHERS_BLAME_REGION_KEY)
-        self.view.erase_status(STATUS_KEY)
 
 
 class RunTidyDiffCommand(sublime_plugin.TextCommand):
@@ -473,7 +496,7 @@ class TidyListener(sublime_plugin.EventListener):
         update_manager.run_now(view)
 
     def on_modified_async(self, view):
-        update_manager.run_delayed(view)
+        update_manager.run_delayed(view, use_buffer=True)
 
-    # def on_deactivated_async(self, view):
-    #     issues.set_out_of_date(True)
+    def on_activated_async(self, view):
+        update_manager.run_delayed(view)
