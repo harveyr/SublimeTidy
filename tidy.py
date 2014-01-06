@@ -254,7 +254,6 @@ issues = Issues()
 
 
 class ViewUpdateManager(object):
-
     def __init__(self):
         self.run_thread = None
         self.delayed_run_thread = None
@@ -280,7 +279,7 @@ class ViewUpdateManager(object):
     ):
         self.cancel_delayed_run_thread()
         self.delayed_run_thread = threading.Timer(
-            5,
+            4,
             self._run_and_apply_tidy,
             kwargs={
                 'view': view,
@@ -331,8 +330,13 @@ class ViewUpdateManager(object):
             return
 
         current_file = view.file_name()
-        if current_file != self.delayed_run_file:
-            print('Tidy: View file does not match current delayed_run_file')
+        if self.delayed_run_file and current_file != self.delayed_run_file:
+            print(
+                (
+                    'Tidy: View file ({}) does not match current '
+                    'delayed_run_file ({})'
+                ).format(current_file, self.delayed_run_file)
+            )
             self.clear_view(view)
             return
 
@@ -397,29 +401,12 @@ class ViewUpdateManager(object):
         view.erase_regions(OTHERS_BLAME_REGION_KEY)
         view.erase_status(STATUS_KEY)
 
+
 update_manager = ViewUpdateManager()
 
 
-class TidyBaseTextCommand(sublime_plugin.TextCommand):
-    def _prompt_refresh(self):
-        if sublime.ok_cancel_dialog('Tidy needs to refresh itself.'):
-            # TODO: This doesn't work right because threads.
-            self.view.run_command('run_tidy')
-            return True
-        return False
-
-    def _confirm_up_to_date(self):
-        if issues.out_of_date:
-            return self._prompt_refresh()
-        else:
-            return True
-
-
-class ShowTidyIssuesCommand(TidyBaseTextCommand):
+class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
     def run(self, edit):
-        if not self._confirm_up_to_date():
-            return
-
         line_regions = self.view.lines(
             sublime.Region(0, self.view.sel()[0].begin() + 1)
         )
@@ -428,6 +415,7 @@ class ShowTidyIssuesCommand(TidyBaseTextCommand):
             i.blamed_str(issues.blame(i)) for i in issues.issues
             if i.line == line_no
         ]
+
         w = sublime.active_window()
         panel = w.create_output_panel('tidy_issues_panel')
         panel.replace(
@@ -442,7 +430,7 @@ class ShowTidyIssuesCommand(TidyBaseTextCommand):
         sel.add(line_regions[-1])
 
 
-class JumpToNextUntidyCommand(TidyBaseTextCommand):
+class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
     # TODO: Continue to figure out when we need to force an update here
     def run(self, edit):
         if not update_manager.join():
@@ -450,7 +438,7 @@ class JumpToNextUntidyCommand(TidyBaseTextCommand):
 
         if not issues.issues:
             return
-        
+
         line_regions = self.view.lines(sublime.Region(0, self.view.size()))
         if not line_regions:
             # This seems to happen when we're in the quick panel
