@@ -224,7 +224,7 @@ class Issues(object):
             t.start()
 
         for t in threads:
-            t.join(10)
+            t.join(5)
 
         self.set_out_of_date(False)
 
@@ -240,8 +240,11 @@ class Issues(object):
             d[issue.region].append(issue)
         return d
 
-    def blame(self, issue):
+    def blame_issue(self, issue):
         return self.blame_by_line.get(issue.line, None)
+
+    def blame_line(self, line_no):
+        return self.blame_by_line.get(line_no, None)
 
     @property
     def out_of_date(self):
@@ -258,6 +261,7 @@ class ViewUpdateManager(object):
         self.run_thread = None
         self.delayed_run_thread = None
         self.delayed_run_file = None
+        self.last_path = None
 
     @property
     def is_running(self):
@@ -291,35 +295,28 @@ class ViewUpdateManager(object):
         self.delayed_run_file = view.file_name()
         view.set_status(STATUS_KEY, 'Tidy: Updating shortly...')
 
-    def join(self):
-        try:
-            if self.delayed_run_thread.is_alive():
-                self.delayed_run_thread.cancel()
-
-            self.run_thread.join(3.0)
-            if self.run_thread.is_alive():
-                print('join timeout')
-                return False
-        except AttributeError:
-            pass
-
-        return True
-
-    def run_now(self, view):
+    def run_now(self, view, as_thread=True):
         if self.is_running:
             print('Tidy already running.')
             return
 
         self.cancel_delayed_run_thread()
 
-        self.run_thread = threading.Thread(
-            target=self._run_and_apply_tidy,
-            kwargs={
-                'view': view,
-                'force': True,
-            }
-        )
-        self.run_thread.start()
+        if as_thread:
+            self.run_thread = threading.Thread(
+                target=self._run_and_apply_tidy,
+                kwargs={
+                    'view': view,
+                    'force': True,
+                }
+            )
+            self.run_thread.start()
+        else:
+            self._run_and_apply_tidy(view=view, force=True)
+
+    def run_if_necessary(self, view):
+        if not self.is_current(view):
+            self.run_now(view, as_thread=False)
 
     def _run_and_apply_tidy(self, view, use_buffer=False, force=False):
         print('Tidy: Attempting update...')
@@ -357,6 +354,7 @@ class ViewUpdateManager(object):
             issues.set_path(current_file)
 
         self._update_view(view)
+        self.last_path = current_file
 
     def _update_view(self, view):
         lines = view.lines(sublime.Region(0, view.size()))
@@ -370,7 +368,7 @@ class ViewUpdateManager(object):
                 line_region.begin()
             )
             issue.set_region(issue_region)
-            if MY_NAME_REX.search(issues.blame(issue)):
+            if MY_NAME_REX.search(issues.blame_issue(issue)):
                 my_regions.append(issue_region)
             else:
                 others_regions.append(issue_region)
@@ -401,20 +399,29 @@ class ViewUpdateManager(object):
         view.erase_regions(OTHERS_BLAME_REGION_KEY)
         view.erase_status(STATUS_KEY)
 
+    def is_current(self, view):
+        return self.last_path == view.file_name()        
+
 
 update_manager = ViewUpdateManager()
 
 
 class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
     def run(self, edit):
+        update_manager.run_if_necessary(self.view)
+
         line_regions = self.view.lines(
             sublime.Region(0, self.view.sel()[0].begin() + 1)
         )
         line_no = len(line_regions)
         issue_strs = [
-            i.blamed_str(issues.blame(i)) for i in issues.issues
+            i.blamed_str(issues.blame_issue(i)) for i in issues.issues
             if i.line == line_no
         ]
+
+        if not issue_strs:
+            blame_name = issues.blame_line(line_no)
+            issue_strs = ['All clean! !m {}'.format(blame_name)]
 
         w = sublime.active_window()
         panel = w.create_output_panel('tidy_issues_panel')
@@ -433,8 +440,7 @@ class ShowTidyIssuesCommand(sublime_plugin.TextCommand):
 class JumpToNextUntidyCommand(sublime_plugin.TextCommand):
     # TODO: Continue to figure out when we need to force an update here
     def run(self, edit):
-        if not update_manager.join():
-            return
+        update_manager.run_if_necessary(self.view)
 
         if not issues.issues:
             return
