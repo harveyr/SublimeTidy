@@ -1,12 +1,12 @@
-import sublime
-import sublime_plugin
 import re
 import subprocess
 from collections import defaultdict
 import os
 import threading
 import tempfile
-import queue
+
+import sublime
+import sublime_plugin
 
 
 PACKAGE_SETTINGS = sublime.load_settings('tidy.sublime-settings')
@@ -28,7 +28,6 @@ MY_NAME_REX = re.compile(
 
 # TODO: Provide report of all modified files
 # TODO: Intelligently handle executable paths
-# TODO: Decide what to do about changing views
 # TODO: If panel is up during update, update panel contents
 
 
@@ -195,16 +194,15 @@ class Issues(object):
         self.path = None
         self.issues = []
         self.set_out_of_date(True)
-        self.queue = queue.Queue()
 
     def set_path(self, path, lint_override_target=None):
-        self.update_issues(lint_override_target or path)
+        self._update_issues(lint_override_target or path)
         self.blame_by_line = blame(path)
 
     def _append_issues(self, issues_func, path):
         self.issues += issues_func(path)
 
-    def update_issues(self, path):
+    def _update_issues(self, path):
         """Run linters and save results."""
         self.issues = []
 
@@ -213,6 +211,8 @@ class Issues(object):
             issue_funcs = [pep8, pylint, pyflakes]
         elif ext in ['.js', '.json', '.sublime-settings']:
             issue_funcs = [jshint]
+        else:
+            return
 
         threads = []
         for func in issue_funcs:
@@ -368,7 +368,9 @@ class ViewUpdateManager(object):
                 line_region.begin()
             )
             issue.set_region(issue_region)
-            if MY_NAME_REX.search(issues.blame_issue(issue)):
+
+            blame_name = issues.blame_issue(issue)
+            if blame_name and MY_NAME_REX.search(blame_name):
                 my_regions.append(issue_region)
             else:
                 others_regions.append(issue_region)
