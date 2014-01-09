@@ -19,6 +19,7 @@ PEP8_REX = re.compile(r'\w+:(\d+):(\d+):\s(\w+)\s(.+)$', re.MULTILINE)
 PYLINT_REX = re.compile(r'^(\w):\s+(\d+),\s*(\d+):\s(.+)$', re.MULTILINE)
 PYFLAKES_REX = re.compile(r'\w+:(\d+):\s(.+)$', re.MULTILINE)
 JSHINT_REX = re.compile(r'\w+: line (\d+), col (\d+),\s(.+)$', re.MULTILINE)
+GOVET_REX = re.compile(r'vet: .+:(\d):(\d): (.+)$', re.MULTILINE)
 BLAME_NAME_REX = re.compile(r'\(([\w\s]+)\d{4}')
 
 MY_NAME_REX = re.compile(
@@ -156,6 +157,25 @@ def jshint(path):
     return results
 
 
+def govet(path):
+    cmd = '/usr/local/go/bin/go tool vet {}'.format(path)
+    output = run(cmd)
+    hits = GOVET_REX.findall(output)
+    results = []
+    for hit in hits:
+        results.append(
+            Issue(
+                line= hit[0],
+                column= hit[1],
+                code='',
+                message=hit[2],
+                reporter='go vet'
+            )
+
+        )
+    return results
+
+
 def diff_files():
     output = (
         subprocess.check_output(['git', 'diff', '--name-only', 'master..']) +
@@ -211,6 +231,8 @@ class Issues(object):
             issue_funcs = [pep8, pylint, pyflakes]
         elif ext in ['.js', '.json', '.sublime-settings']:
             issue_funcs = [jshint]
+        elif ext == '.go':
+            issue_funcs = [govet]
         else:
             return
 
